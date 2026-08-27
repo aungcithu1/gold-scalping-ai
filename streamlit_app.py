@@ -1,11 +1,13 @@
 from __future__ import annotations
 import io
+import os
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
+from ctrader_oauth import CTraderConfig, authorization_url, exchange_code, refresh_access_token
 from trading_core import (
     Backtester,
     CsvFeed,
@@ -15,7 +17,6 @@ from trading_core import (
     SignalEngine,
     ai_commentary,
     features,
-    performance_metrics,
     resample_m5,
 )
 
@@ -23,7 +24,15 @@ load_dotenv()
 
 st.set_page_config(page_title="Gold Scalping AI Lab", page_icon="🥇", layout="wide")
 st.title("🥇 Gold Scalping AI Lab")
-st.caption("XAUUSD M1/M5 research, paper/demo analysis, risk controls and backtesting. Autonomous live-money execution is disabled.")
+st.caption("XAUUSD M1/M5 research, paper/demo analysis, risk controls and FxPro cTrader connection setup. Autonomous live-money execution is disabled.")
+
+
+def secret(name: str, default: str = "") -> str:
+    try:
+        value = st.secrets.get(name, None)
+    except Exception:
+        value = None
+    return str(value if value not in (None, "") else os.getenv(name, default))
 
 
 def read_uploaded_csv(uploaded, fallback: str) -> pd.DataFrame:
@@ -114,20 +123,84 @@ with risk_col:
     st.success("PAPER / DEMO research mode")
     st.info(f"Daily kill-switch: {max_daily_loss_pct:.2f}%\n\nMax trades/day: {int(max_trades)}")
 
-chart_tab, trades_tab, equity_tab, ai_tab, format_tab = st.tabs(["📈 Trend chart", "📒 Trade journal", "💰 Equity", "🤖 AI context", "🧾 CSV format"])
+chart_tab, trades_tab, equity_tab, fxpro_tab, ai_tab, format_tab = st.tabs([
+    "📈 Trend chart", "📒 Trade journal", "💰 Equity", "🔌 FxPro cTrader", "🤖 AI context", "🧾 CSV format"
+])
+
 with chart_tab:
     view = m1.tail(400).set_index("timestamp")[["close", "ema9", "ema21", "ema50"]]
     st.line_chart(view)
     st.caption("M1 close + EMA 9/21/50. M5 confirmation is calculated from completed 5-minute bars.")
+
 with trades_tab:
     if trades.empty:
         st.warning("No trades in this sample/configuration.")
     else:
         st.dataframe(trades, use_container_width=True, hide_index=True)
         st.download_button("Download journal CSV", trades.to_csv(index=False), "trade_journal.csv", "text/csv")
+
 with equity_tab:
     if not equity.empty:
         st.line_chart(equity.set_index("timestamp")[["equity"]])
+
+with fxpro_tab:
+    st.subheader("FxPro cTrader connection")
+    st.write("Use a FxPro **cTrader** trading account. FxPro Direct wallet credentials are not entered into this app.")
+
+    cfg = CTraderConfig.from_values(
+        secret("CTRADER_CLIENT_ID"),
+        secret("CTRADER_CLIENT_SECRET"),
+        secret("CTRADER_REDIRECT_URI", "https://act-gold-scalping-ai.streamlit.app/"),
+    )
+    env = secret("CTRADER_ENV", "demo").lower()
+
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("OAuth config", "Ready" if cfg.ready else "Missing")
+    col_b.metric("Environment", "DEMO" if env != "live" else "LIVE")
+    col_c.metric("Permission", "READ ONLY")
+
+    if not cfg.ready:
+        st.warning("Add CTRADER_CLIENT_ID, CTRADER_CLIENT_SECRET and CTRADER_REDIRECT_URI in Streamlit App settings → Secrets.")
+        st.code(
+            'CTRADER_CLIENT_ID="..."\n'
+            'CTRADER_CLIENT_SECRET="..."\n'
+            'CTRADER_REDIRECT_URI="https://act-gold-scalping-ai.streamlit.app/"\n'
+            'CTRADER_ENV="demo"',
+            language="toml",
+        )
+        st.info("Register and approve an application in the cTrader Open API portal first, then add the exact Streamlit URL as its redirect URI.")
+    else:
+        auth_url = authorization_url(cfg, scope="accounts")
+        st.link_button("Authorize FxPro cTrader (read-only)", auth_url, type="primary")
+        st.caption("The app requests the cTrader 'accounts' scope only. It cannot place trades with this permission.")
+
+        code = st.query_params.get("code")
+        if code and "ctrader_tokens" not in st.session_state:
+            try:
+                with st.spinner("Exchanging cTrader authorization code..."):
+                    st.session_state["ctrader_tokens"] = exchange_code(cfg, str(code))
+                st.query_params.clear()
+                st.rerun()
+            except Exception as exc:
+                st.error(f"cTrader authorization failed: {exc}")
+
+        tokens = st.session_state.get("ctrader_tokens")
+        if tokens:
+            st.success("cTrader OAuth connected for this browser session.")
+            st.write({"token_type": tokens.get("tokenType", "bearer"), "expires_in_seconds": tokens.get("expiresIn")})
+            if st.button("Refresh cTrader access token") and tokens.get("refreshToken"):
+                try:
+                    st.session_state["ctrader_tokens"] = refresh_access_token(cfg, tokens["refreshToken"])
+                    st.success("Token refreshed.")
+                except Exception as exc:
+                    st.error(f"Refresh failed: {exc}")
+            if st.button("Disconnect cTrader session"):
+                st.session_state.pop("ctrader_tokens", None)
+                st.rerun()
+            st.info("Next connector stage: authenticate the cTrader trading account and subscribe to XAUUSD M1/live spot data. Keep CTRADER_ENV=demo while testing.")
+        else:
+            st.info("After authorization, cTrader redirects back here and the app exchanges the one-time code automatically.")
+
 with ai_tab:
     if st.button("Generate AI risk commentary"):
         text = ai_commentary(m1, latest)
@@ -135,9 +208,10 @@ with ai_tab:
             st.write(text)
         else:
             st.warning("OPENAI_API_KEY is not configured. The quantitative engine still works without it.")
+
 with format_tab:
     st.code("timestamp,open,high,low,close,spread\n2026-08-27T08:00:00Z,4500.1,4501.2,4499.7,4500.8,0.25", language="text")
     st.code("timestamp,title,currency,impact\n2026-08-27T12:30:00Z,US GDP,USD,high", language="text")
 
 st.divider()
-st.caption("Backtests are estimates, not guarantees. This build makes conservative same-bar fill assumptions and blocks autonomous live-money execution.")
+st.caption("Backtests are estimates, not guarantees. This build blocks autonomous live-money execution and uses read-only cTrader OAuth permission.")
