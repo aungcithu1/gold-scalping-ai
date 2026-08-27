@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+.streamlit/secrets.toml
+.uploaded_market.csv
+trade_journal.csv
+test_trade_journal.csv
+.pytest_cache/
