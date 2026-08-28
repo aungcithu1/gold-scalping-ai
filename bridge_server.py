@@ -1,16 +1,18 @@
 from __future__ import annotations
-from collections import defaultdict, deque
+from collections import defaultdict
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Any, Deque, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="Gold Scalping MT5 Bridge", version="0.1")
+app = FastAPI(title="Gold Scalping MT5 Bridge", version="0.2")
 _lock = Lock()
-_bars: Dict[str, Deque[Dict[str, Any]]] = defaultdict(lambda: deque(maxlen=5000))
+# account_id -> timestamp -> packet. Timestamp keys make live updates idempotent.
+_bars: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(dict)
 _accounts: Dict[str, Dict[str, Any]] = {}
+MAX_BARS_PER_ACCOUNT = 5000
 
 
 class MT5Packet(BaseModel):
@@ -30,27 +32,59 @@ class MT5Packet(BaseModel):
     equity: Optional[float] = None
 
 
+def _store(packet: MT5Packet) -> None:
+    row = packet.model_dump(mode="json")
+    row["received_at"] = datetime.now(timezone.utc).isoformat()
+    ts_key = row["timestamp"]
+    account = _bars[packet.account_id]
+    account[ts_key] = row
+
+    if len(account) > MAX_BARS_PER_ACCOUNT:
+        oldest = sorted(account.keys())[: len(account) - MAX_BARS_PER_ACCOUNT]
+        for key in oldest:
+            account.pop(key, None)
+
+    _accounts[packet.account_id] = {
+        "account_id": packet.account_id,
+        "account_mode": packet.account_mode,
+        "broker": packet.broker,
+        "symbol": packet.symbol,
+        "balance": packet.balance,
+        "equity": packet.equity,
+        "bars": len(account),
+        "last_seen": row["received_at"],
+    }
+
+
+@app.get("/")
+def root():
+    return {"service": "Gold Scalping MT5 Bridge", "ok": True, "accounts": len(_accounts)}
+
+
 @app.get("/health")
 def health():
-    return {"ok": True, "accounts": len(_accounts)}
+    with _lock:
+        bars = sum(len(v) for v in _bars.values())
+        return {"ok": True, "accounts": len(_accounts), "bars": bars}
 
 
 @app.post("/ingest")
 def ingest(packet: MT5Packet):
-    row = packet.model_dump(mode="json")
-    row["received_at"] = datetime.now(timezone.utc).isoformat()
     with _lock:
-        _bars[packet.account_id].append(row)
-        _accounts[packet.account_id] = {
-            "account_id": packet.account_id,
-            "account_mode": packet.account_mode,
-            "broker": packet.broker,
-            "symbol": packet.symbol,
-            "balance": packet.balance,
-            "equity": packet.equity,
-            "last_seen": row["received_at"],
-        }
-    return {"ok": True}
+        _store(packet)
+    return {"ok": True, "stored": 1}
+
+
+@app.post("/ingest_batch")
+def ingest_batch(packets: List[MT5Packet]):
+    if not packets:
+        raise HTTPException(400, "empty batch")
+    if len(packets) > 500:
+        raise HTTPException(400, "batch limit is 500 packets")
+    with _lock:
+        for packet in packets:
+            _store(packet)
+    return {"ok": True, "stored": len(packets)}
 
 
 @app.get("/accounts")
@@ -61,20 +95,22 @@ def accounts():
 
 @app.get("/bars/{account_id}")
 def bars(account_id: str, limit: int = 1000):
-    if limit < 1 or limit > 5000:
+    if limit < 1 or limit > MAX_BARS_PER_ACCOUNT:
         raise HTTPException(400, "limit must be 1..5000")
     with _lock:
-        rows = list(_bars.get(account_id, []))[-limit:]
+        account = _bars.get(account_id, {})
+        rows = [account[k] for k in sorted(account.keys())][-limit:]
     return rows
 
 
 @app.get("/latest/{account_id}")
 def latest(account_id: str):
     with _lock:
-        rows = _bars.get(account_id)
-        if not rows:
+        account = _bars.get(account_id, {})
+        if not account:
             raise HTTPException(404, "no data")
-        return rows[-1]
+        key = max(account.keys())
+        return account[key]
 
 
 if __name__ == "__main__":
