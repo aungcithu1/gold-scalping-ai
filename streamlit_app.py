@@ -72,6 +72,7 @@ try:
         default_label=list(labels)[0]; selected_label=default_label; selected_account=labels[selected_label]; selected_meta=next(a for a in accounts if a["account_id"]==selected_account)
 except Exception as exc: st.error(f"MT5 bridge not reachable: {exc}")
 
+max_spread=.60; vol_ratio=1.80; sl_atr=.90; tp_atr=1.35; be_r=.75; trail_start_r=1.; trail_atr=.60; starting_equity=10000.; risk_pct=.25; max_daily_loss_pct=1.; max_trades=8
 with st.sidebar:
     st.header("Connection")
     if selected_meta: st.success(f"{selected_meta.get('account_mode')} • {selected_account}\n\n{selected_meta.get('symbol','GOLD')} • {selected_meta.get('bars',0)} bars")
@@ -81,8 +82,6 @@ with st.sidebar:
         be_r=st.number_input("Breakeven trigger (R)",.1,5.,.75,.05); trail_start_r=st.number_input("Trailing starts (R)",.1,5.,1.,.05); trail_atr=st.number_input("Trailing distance ATR",.1,5.,.60,.05)
     with st.expander("Risk / backtest",expanded=False):
         starting_equity=st.number_input("Starting equity",100.,value=10000.,step=500.); risk_pct=st.number_input("Risk / trade %",.01,5.,.25,.05); max_daily_loss_pct=st.number_input("Daily loss kill-switch %",.1,20.,1.,.1); max_trades=st.number_input("Max trades/day",1,100,8,1)
-else:
-    max_spread=.60; vol_ratio=1.80; sl_atr=.90; tp_atr=1.35; be_r=.75; trail_start_r=1.; trail_atr=.60; starting_equity=10000.; risk_pct=.25; max_daily_loss_pct=1.; max_trades=8
 
 scfg=StrategyConfig(max_spread=max_spread,vol_spike_ratio=vol_ratio,sl_atr=sl_atr,tp_atr=tp_atr,breakeven_r=be_r,trailing_start_r=trail_start_r,trailing_atr=trail_atr)
 rcfg=RiskConfig(starting_equity=starting_equity,risk_per_trade=risk_pct/100,max_daily_loss=max_daily_loss_pct/100,max_trades_per_day=int(max_trades)); news=NewsBlackout.from_csv("sample_news.csv",20,20)
