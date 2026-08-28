@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="Gold Scalping MT5 Bridge", version="0.4")
@@ -69,12 +70,10 @@ def _store(packet: MT5Packet) -> None:
     ts_key = row["timestamp"]
     account = _bars[packet.account_id]
     account[ts_key] = row
-
     if len(account) > MAX_BARS_PER_ACCOUNT:
         oldest = sorted(account.keys())[: len(account) - MAX_BARS_PER_ACCOUNT]
         for key in oldest:
             account.pop(key, None)
-
     _accounts[packet.account_id] = {
         "account_id": packet.account_id,
         "account_mode": packet.account_mode,
@@ -153,8 +152,7 @@ def latest(account_id: str):
         account = _bars.get(account_id, {})
         if not account:
             raise HTTPException(404, "no data")
-        key = max(account.keys())
-        return account[key]
+        return account[max(account.keys())]
 
 
 @app.post("/signal_zone")
@@ -163,7 +161,6 @@ def signal_zone(zone: SignalZone):
     with _lock:
         _prune_zones(zone.account_id)
         existing = _signal_zones[zone.account_id]
-        # One zone per side per minute; refresh it instead of creating noise every 2 seconds.
         minute_key = str(row["timestamp"])[:16]
         replaced = False
         for idx in range(len(existing) - 1, -1, -1):
@@ -197,14 +194,13 @@ def manual_order(order: ManualOrder):
     return {"ok": True, "command_id": cmd["id"], "status": "PENDING"}
 
 
-@app.get("/command_text/{account_id}")
+@app.get("/command_text/{account_id}", response_class=PlainTextResponse)
 def command_text(account_id: str):
     with _lock:
         pending = next((x for x in _commands.get(account_id, []) if x.get("status") == "PENDING"), None)
         if not pending:
             return "NONE"
         pending["status"] = "DELIVERED"
-        # Pipe-delimited text is intentionally simple for MQL5 parsing.
         return "{id}|{side}|{symbol}|{volume:.4f}|{sl:.8f}|{tp:.8f}".format(
             id=pending["id"], side=pending["side"], symbol=pending["symbol"], volume=pending["volume"],
             sl=pending["stop_loss"], tp=pending["take_profit"]
