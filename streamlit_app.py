@@ -8,7 +8,6 @@ import pandas as pd
 import requests
 import streamlit as st
 from dotenv import load_dotenv
-from streamlit_autorefresh import st_autorefresh
 
 from trading_core import (
     Backtester,
@@ -215,11 +214,9 @@ with st.sidebar:
     max_trades = st.number_input("Max trades / day", 1, 100, 8, 1)
     news_upload = st.file_uploader("News calendar CSV", type=["csv"])
 
-if source == "FxPro MT5 Bridge":
-    st_autorefresh(interval=2000, limit=None, key="mt5_live_refresh")
-
 scfg = StrategyConfig(max_spread=max_spread, vol_spike_ratio=vol_ratio, sl_atr=sl_atr, tp_atr=tp_atr, breakeven_r=be_r, trailing_start_r=trail_start_r, trailing_atr=trail_atr)
 rcfg = RiskConfig(starting_equity=starting_equity, risk_per_trade=risk_pct/100.0, max_daily_loss=max_daily_loss_pct/100.0, max_trades_per_day=int(max_trades))
+news = NewsBlackout.from_csv("sample_news.csv", scfg.news_blackout_before_min, scfg.news_blackout_after_min) if news_upload is None else NewsBlackout(pd.read_csv(io.BytesIO(news_upload.getvalue())), scfg.news_blackout_before_min, scfg.news_blackout_after_min)
 
 try:
     if source == "FxPro MT5 Bridge" and selected_account:
@@ -228,13 +225,6 @@ try:
         raw = read_uploaded_csv(market_upload, "sample_xauusd.csv")
     else:
         raw = CsvFeed("sample_xauusd.csv").load()
-except Exception as exc:
-    st.error(f"Market data error: {exc}")
-    st.stop()
-
-news = NewsBlackout.from_csv("sample_news.csv", scfg.news_blackout_before_min, scfg.news_blackout_after_min) if news_upload is None else NewsBlackout(pd.read_csv(io.BytesIO(news_upload.getvalue())), scfg.news_blackout_before_min, scfg.news_blackout_after_min)
-
-try:
     trades, equity, metrics = Backtester(scfg, rcfg, news).run(raw)
     m1 = features(raw, scfg).dropna().reset_index(drop=True)
     m5 = features(resample_m5(raw), scfg).dropna().reset_index(drop=True)
@@ -243,27 +233,53 @@ except Exception as exc:
     st.error(str(exc))
     st.stop()
 
-if source == "FxPro MT5 Bridge" and selected_account:
-    save_signal_zone(bridge_url, selected_account, latest)
-    zones = bridge_zones(bridge_url, selected_account)
-else:
-    zones = pd.DataFrame()
 
-conf = confidence_pct(latest.score)
-signal_icon = "🟢" if latest.side == "BUY" else "🔴" if latest.side == "SELL" else "🟡"
-signal_label = latest.side if latest.side in ("BUY", "SELL") else "WAIT"
+@st.fragment(run_every="2s")
+def live_panel():
+    if source != "FxPro MT5 Bridge" or not selected_account:
+        live_raw = raw
+    else:
+        try:
+            live_raw = load_bridge(bridge_url, selected_account)
+        except Exception as exc:
+            st.warning(f"Live refresh error: {exc}")
+            return
 
-st.subheader("Live AI signal")
-a, b, c, d = st.columns([1.2, 1, 1, 1])
-a.metric("Signal", f"{signal_icon} {signal_label}")
-b.metric("Setup confidence", f"{conf}%")
-c.metric("M1 / M5", f"{latest.m1_side} / {latest.m5_side}")
-d.metric("Last GOLD", f"{float(m1.iloc[-1].close):.2f}")
+    try:
+        live_m1 = features(live_raw, scfg).dropna().reset_index(drop=True)
+        live_m5 = features(resample_m5(live_raw), scfg).dropna().reset_index(drop=True)
+        live_sig = SignalEngine(scfg, news).decide_at(live_m1, live_m5, len(live_m1)-1)
+    except Exception as exc:
+        st.warning(f"Live signal error: {exc}")
+        return
 
-if latest.side in ("BUY", "SELL"):
-    st.success(f"{latest.side} setup • Entry {latest.entry:.2f} • SL {latest.stop:.2f} • TP {latest.target:.2f} • {latest.reason}")
-else:
-    st.info(f"WAIT • {latest.reason}" + (f" • {latest.filter_reason}" if latest.filter_reason else ""))
+    if source == "FxPro MT5 Bridge" and selected_account:
+        save_signal_zone(bridge_url, selected_account, live_sig)
+        live_zones = bridge_zones(bridge_url, selected_account)
+    else:
+        live_zones = pd.DataFrame()
+
+    conf = confidence_pct(live_sig.score)
+    icon = "🟢" if live_sig.side == "BUY" else "🔴" if live_sig.side == "SELL" else "🟡"
+    label = live_sig.side if live_sig.side in ("BUY", "SELL") else "WAIT"
+
+    st.subheader("Live AI signal")
+    a, b, c, d = st.columns([1.2, 1, 1, 1])
+    a.metric("Signal", f"{icon} {label}")
+    b.metric("Setup confidence", f"{conf}%")
+    c.metric("M1 / M5", f"{live_sig.m1_side} / {live_sig.m5_side}")
+    d.metric("Last GOLD", f"{float(live_m1.iloc[-1].close):.2f}")
+    if live_sig.side in ("BUY", "SELL"):
+        st.success(f"{live_sig.side} setup • Entry {live_sig.entry:.2f} • SL {live_sig.stop:.2f} • TP {live_sig.target:.2f} • {live_sig.reason}")
+    else:
+        st.info(f"WAIT • {live_sig.reason}" + (f" • {live_sig.filter_reason}" if live_sig.filter_reason else ""))
+
+    st.altair_chart(gold_chart(live_m1, live_zones), use_container_width=True)
+    last = live_m1.iloc[-1]
+    st.caption(f"GOLD M1 + EMA 9/21/50 • Last {last['close']:.2f} • EMA9 {last['ema9']:.2f} • EMA21 {last['ema21']:.2f} • EMA50 {last['ema50']:.2f}. Only this live panel refreshes every 2 seconds.")
+
+
+live_panel()
 
 if source == "FxPro MT5 Bridge" and selected_account and selected_meta:
     st.subheader("Manual trade control")
@@ -299,12 +315,9 @@ c3.metric("Profit factor", "∞" if pf == float("inf") else f"{pf:.2f}")
 c4.metric("Max drawdown", f"{metrics['max_drawdown_pct']:.2f}%")
 c5.metric("Net P/L", f"${metrics['net_pnl']:.2f}")
 
-chart_tab, zones_tab, orders_tab, trades_tab, equity_tab, ai_tab = st.tabs(["📈 Live chart + zones", "🟢🔴 24h zones", "🖱️ Manual orders", "📒 Backtest journal", "💰 Equity", "🤖 AI context"])
-with chart_tab:
-    st.altair_chart(gold_chart(m1, zones), use_container_width=True)
-    last = m1.iloc[-1]
-    st.caption(f"GOLD M1 + EMA 9/21/50 • Last {last['close']:.2f} • EMA9 {last['ema9']:.2f} • EMA21 {last['ema21']:.2f} • EMA50 {last['ema50']:.2f}. Colored bands/triangles are AI BUY/SELL zones retained for 24 hours.")
+zones_tab, orders_tab, trades_tab, equity_tab, ai_tab = st.tabs(["🟢🔴 24h zones", "🖱️ Manual orders", "📒 Backtest journal", "💰 Equity", "🤖 AI context"])
 with zones_tab:
+    zones = bridge_zones(bridge_url, selected_account) if source == "FxPro MT5 Bridge" and selected_account else pd.DataFrame()
     if zones.empty:
         st.info("No BUY/SELL zone has qualified yet in the current 24-hour record.")
     else:
@@ -336,4 +349,4 @@ with ai_tab:
         st.write(text if text else "OPENAI_API_KEY is not configured. The quantitative signal engine still runs without it.")
 
 st.divider()
-st.caption("Signals are model/rule outputs, not guarantees. The signal engine never sends an order by itself; MT5 orders require a human click in the Manual trade control.")
+st.caption("Signals are model/rule outputs, not guarantees. Only the live signal/chart fragment refreshes every 2 seconds; the page and controls stay stable.")
