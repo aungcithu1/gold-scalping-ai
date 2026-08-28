@@ -8,6 +8,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from dotenv import load_dotenv
+from streamlit_autorefresh import st_autorefresh
 
 from trading_core import (
     Backtester,
@@ -155,6 +156,9 @@ with st.sidebar:
     max_daily_loss_pct = st.number_input("Daily loss kill-switch (%)", min_value=0.1, max_value=20.0, value=1.0, step=0.1)
     max_trades = st.number_input("Max trades / day", min_value=1, max_value=100, value=8, step=1)
     news_upload = st.file_uploader("News calendar CSV", type=["csv"])
+
+if source == "FxPro MT5 Bridge":
+    st_autorefresh(interval=2000, limit=None, key="mt5_live_refresh")
 
 scfg = StrategyConfig(max_spread=max_spread, vol_spike_ratio=vol_ratio, sl_atr=sl_atr, tp_atr=tp_atr,
                       breakeven_r=be_r, trailing_start_r=trail_start_r, trailing_atr=trail_atr)
