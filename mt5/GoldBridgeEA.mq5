@@ -31,6 +31,17 @@ string JsonEscape(string s)
    return s;
 }
 
+string SafeQuery(string s)
+{
+   StringReplace(s, " ", "_");
+   StringReplace(s, "&", "_");
+   StringReplace(s, "?", "_");
+   StringReplace(s, "#", "_");
+   StringReplace(s, "/", "_");
+   StringReplace(s, "|", "_");
+   return s;
+}
+
 string IsoTime(datetime t)
 {
    string ts = TimeToString(t, TIME_DATE|TIME_MINUTES|TIME_SECONDS);
@@ -89,13 +100,35 @@ bool GetText(string url, string &text)
    return true;
 }
 
+void PositionSnapshot(string symbol, string &ticket, string &side, double &volume, double &price, double &sl, double &tp)
+{
+   ticket = "";
+   side = "NONE";
+   volume = 0.0;
+   price = 0.0;
+   sl = 0.0;
+   tp = 0.0;
+   if(!PositionSelect(symbol)) return;
+   ticket = IntegerToString((long)PositionGetInteger(POSITION_TICKET));
+   long type = PositionGetInteger(POSITION_TYPE);
+   side = type == POSITION_TYPE_BUY ? "BUY" : "SELL";
+   volume = PositionGetDouble(POSITION_VOLUME);
+   price = PositionGetDouble(POSITION_PRICE_OPEN);
+   sl = PositionGetDouble(POSITION_SL);
+   tp = PositionGetDouble(POSITION_TP);
+}
+
 string PacketJson(string symbol, MqlRates &bar, double bid, double ask, double spread)
 {
+   string pos_ticket, pos_side;
+   double pos_volume, pos_price, pos_sl, pos_tp;
+   PositionSnapshot(symbol, pos_ticket, pos_side, pos_volume, pos_price, pos_sl, pos_tp);
    return StringFormat(
-      "{\"account_id\":\"%I64d\",\"account_mode\":\"%s\",\"broker\":\"%s\",\"symbol\":\"%s\",\"timestamp\":\"%s\",\"open\":%.8f,\"high\":%.8f,\"low\":%.8f,\"close\":%.8f,\"bid\":%.8f,\"ask\":%.8f,\"spread\":%.8f,\"balance\":%.2f,\"equity\":%.2f}",
+      "{\"account_id\":\"%I64d\",\"account_mode\":\"%s\",\"broker\":\"%s\",\"symbol\":\"%s\",\"timestamp\":\"%s\",\"open\":%.8f,\"high\":%.8f,\"low\":%.8f,\"close\":%.8f,\"bid\":%.8f,\"ask\":%.8f,\"spread\":%.8f,\"balance\":%.2f,\"equity\":%.2f,\"current_position_ticket\":\"%s\",\"current_position_side\":\"%s\",\"current_position_volume\":%.4f,\"current_position_price\":%.8f,\"current_position_sl\":%.8f,\"current_position_tp\":%.8f}",
       AccountInfoInteger(ACCOUNT_LOGIN), AccountModeText(), JsonEscape(AccountInfoString(ACCOUNT_COMPANY)),
       JsonEscape(symbol), IsoTime(bar.time), bar.open, bar.high, bar.low, bar.close, bid, ask, spread,
-      AccountInfoDouble(ACCOUNT_BALANCE), AccountInfoDouble(ACCOUNT_EQUITY)
+      AccountInfoDouble(ACCOUNT_BALANCE), AccountInfoDouble(ACCOUNT_EQUITY),
+      JsonEscape(pos_ticket), JsonEscape(pos_side), pos_volume, pos_price, pos_sl, pos_tp
    );
 }
 
@@ -163,10 +196,21 @@ double NormalizeVolume(string symbol, double requested)
 
 void ReportCommand(string command_id, bool ok, string detail)
 {
-   StringReplace(detail, " ", "_");
-   StringReplace(detail, "|", "_");
    string account = StringFormat("%I64d", AccountInfoInteger(ACCOUNT_LOGIN));
-   string url = BaseUrl() + "/command_result/" + account + "/" + command_id + "?ok=" + (ok ? "1" : "0") + "&detail=" + detail;
+   string pos_ticket, pos_side;
+   double pos_volume, pos_price, pos_sl, pos_tp;
+   PositionSnapshot(BridgeSymbol, pos_ticket, pos_side, pos_volume, pos_price, pos_sl, pos_tp);
+
+   string url = BaseUrl() + "/command_result/" + account + "/" + command_id;
+   url += "?ok=" + (ok ? "1" : "0");
+   url += "&detail=" + SafeQuery(detail);
+   url += "&order_ticket=" + IntegerToString((long)trade.ResultOrder());
+   url += "&deal_ticket=" + IntegerToString((long)trade.ResultDeal());
+   url += "&executed_price=" + DoubleToString(trade.ResultPrice(), 8);
+   url += "&volume=" + DoubleToString(trade.ResultVolume(), 4);
+   url += "&retcode=" + IntegerToString((int)trade.ResultRetcode());
+   url += "&retcode_description=" + SafeQuery(trade.ResultRetcodeDescription());
+   url += "&position_ticket=" + pos_ticket;
    string ignored;
    GetText(url, ignored);
 }
@@ -209,7 +253,9 @@ void PollManualOrder()
    else if(side == "SELL") ok = trade.Sell(volume, symbol, 0.0, sl, tp, "AI-Lab manual SELL");
 
    string detail = "retcode_" + IntegerToString((int)trade.ResultRetcode());
-   Print("GoldBridgeEA manual order ", side, " id=", command_id, " ok=", ok, " ", detail);
+   Print("GoldBridgeEA manual order ", side, " id=", command_id, " ok=", ok,
+         " retcode=", trade.ResultRetcode(), " ", trade.ResultRetcodeDescription(),
+         " order=", trade.ResultOrder(), " deal=", trade.ResultDeal(), " price=", trade.ResultPrice());
    ReportCommand(command_id, ok, detail);
 }
 
