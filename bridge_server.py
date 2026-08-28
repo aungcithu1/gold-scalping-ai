@@ -1,15 +1,17 @@
 from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
+import json
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="Gold Scalping MT5 Bridge", version="0.4")
+app = FastAPI(title="Gold Scalping MT5 Bridge", version="0.5")
 _lock = Lock()
 _bars: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(dict)
 _accounts: Dict[str, Dict[str, Any]] = {}
@@ -18,6 +20,7 @@ _commands: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
 _command_results: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
 MAX_BARS_PER_ACCOUNT = 5000
 ZONE_RETENTION_HOURS = 24
+ZONE_FILE = Path("signal_zones_24h.json")
 
 
 class MT5Packet(BaseModel):
@@ -64,6 +67,26 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _load_zones() -> None:
+    if not ZONE_FILE.exists():
+        return
+    try:
+        data = json.loads(ZONE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            for account_id, rows in data.items():
+                if isinstance(rows, list):
+                    _signal_zones[str(account_id)] = rows
+    except Exception:
+        pass
+
+
+def _save_zones() -> None:
+    try:
+        ZONE_FILE.write_text(json.dumps(dict(_signal_zones), ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _store(packet: MT5Packet) -> None:
     row = packet.model_dump(mode="json")
     row["received_at"] = _now().isoformat()
@@ -96,7 +119,14 @@ def _prune_zones(account_id: str) -> None:
                 kept.append(item)
         except Exception:
             pass
-    _signal_zones[account_id] = kept
+    if len(kept) != len(_signal_zones.get(account_id, [])):
+        _signal_zones[account_id] = kept
+        _save_zones()
+
+
+_load_zones()
+for _aid in list(_signal_zones.keys()):
+    _prune_zones(_aid)
 
 
 @app.get("/")
@@ -108,7 +138,8 @@ def root():
 def health():
     with _lock:
         bars = sum(len(v) for v in _bars.values())
-        return {"ok": True, "accounts": len(_accounts), "bars": bars}
+        zones = sum(len(v) for v in _signal_zones.values())
+        return {"ok": True, "accounts": len(_accounts), "bars": bars, "zones_24h": zones}
 
 
 @app.post("/ingest")
@@ -171,6 +202,7 @@ def signal_zone(zone: SignalZone):
                 break
         if not replaced:
             existing.append(row)
+        _save_zones()
     return {"ok": True}
 
 
@@ -209,13 +241,7 @@ def command_text(account_id: str):
 
 @app.get("/command_result/{account_id}/{command_id}")
 def command_result(account_id: str, command_id: str, ok: int, detail: str = ""):
-    result = {
-        "command_id": command_id,
-        "account_id": account_id,
-        "ok": bool(ok),
-        "detail": detail[:300],
-        "timestamp": _now().isoformat(),
-    }
+    result = {"command_id": command_id, "account_id": account_id, "ok": bool(ok), "detail": detail[:300], "timestamp": _now().isoformat()}
     with _lock:
         for cmd in _commands.get(account_id, []):
             if cmd.get("id") == command_id:
@@ -229,10 +255,7 @@ def command_result(account_id: str, command_id: str, ok: int, detail: str = ""):
 @app.get("/orders/{account_id}")
 def orders(account_id: str):
     with _lock:
-        return {
-            "commands": list(_commands.get(account_id, []))[-50:],
-            "results": list(_command_results.get(account_id, []))[-50:],
-        }
+        return {"commands": list(_commands.get(account_id, []))[-50:], "results": list(_command_results.get(account_id, []))[-50:]}
 
 
 if __name__ == "__main__":
