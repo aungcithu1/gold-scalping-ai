@@ -1,14 +1,19 @@
 #property strict
-#property description "Read-only GOLD M1 data bridge for Gold Scalping AI Lab"
+#property description "GOLD M1 data bridge + human-triggered manual order executor for Gold Scalping AI Lab"
+
+#include <Trade/Trade.mqh>
 
 input string BridgeUrl = "http://127.0.0.1:8765/ingest";
 input string BridgeSymbol = "GOLD";
 input int SendEverySeconds = 2;
 input int HistoricalBars = 500;
 input int BatchSize = 100;
+input bool EnableManualOrders = true;
+input ulong ManualOrderMagic = 26082801;
 
 long last_send = 0;
 bool history_sent = false;
+CTrade trade;
 
 string AccountModeText()
 {
@@ -35,12 +40,17 @@ string IsoTime(datetime t)
    return ts;
 }
 
-string BatchUrl()
+string BaseUrl()
 {
    string u = BridgeUrl;
    int p = StringFind(u, "/ingest");
-   if(p >= 0) return StringSubstr(u, 0, p) + "/ingest_batch";
-   return u + "/ingest_batch";
+   if(p >= 0) return StringSubstr(u, 0, p);
+   return u;
+}
+
+string BatchUrl()
+{
+   return BaseUrl() + "/ingest_batch";
 }
 
 bool PostJson(string url, string body)
@@ -48,16 +58,14 @@ bool PostJson(string url, string body)
    char data[];
    StringToCharArray(body, data, 0, WHOLE_ARRAY, CP_UTF8);
    if(ArraySize(data) > 0) ArrayResize(data, ArraySize(data)-1);
-
    char result[];
    string response_headers;
    string headers = "Content-Type: application/json\r\n";
-
    ResetLastError();
    int code = WebRequest("POST", url, headers, 5000, data, result, response_headers);
    if(code == -1)
    {
-      Print("GoldBridgeEA WebRequest error: ", GetLastError(), ". Add bridge URL to MT5 allowed WebRequest URLs.");
+      Print("GoldBridgeEA WebRequest error: ", GetLastError());
       return false;
    }
    if(code < 200 || code >= 300)
@@ -68,36 +76,33 @@ bool PostJson(string url, string body)
    return true;
 }
 
+bool GetText(string url, string &text)
+{
+   char data[];
+   char result[];
+   string response_headers;
+   string headers = "Accept: text/plain\r\n";
+   ResetLastError();
+   int code = WebRequest("GET", url, headers, 3000, data, result, response_headers);
+   if(code == -1 || code < 200 || code >= 300) return false;
+   text = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+   return true;
+}
+
 string PacketJson(string symbol, MqlRates &bar, double bid, double ask, double spread)
 {
    return StringFormat(
       "{\"account_id\":\"%I64d\",\"account_mode\":\"%s\",\"broker\":\"%s\",\"symbol\":\"%s\",\"timestamp\":\"%s\",\"open\":%.8f,\"high\":%.8f,\"low\":%.8f,\"close\":%.8f,\"bid\":%.8f,\"ask\":%.8f,\"spread\":%.8f,\"balance\":%.2f,\"equity\":%.2f}",
-      AccountInfoInteger(ACCOUNT_LOGIN),
-      AccountModeText(),
-      JsonEscape(AccountInfoString(ACCOUNT_COMPANY)),
-      JsonEscape(symbol),
-      IsoTime(bar.time),
-      bar.open,
-      bar.high,
-      bar.low,
-      bar.close,
-      bid,
-      ask,
-      spread,
-      AccountInfoDouble(ACCOUNT_BALANCE),
-      AccountInfoDouble(ACCOUNT_EQUITY)
+      AccountInfoInteger(ACCOUNT_LOGIN), AccountModeText(), JsonEscape(AccountInfoString(ACCOUNT_COMPANY)),
+      JsonEscape(symbol), IsoTime(bar.time), bar.open, bar.high, bar.low, bar.close, bid, ask, spread,
+      AccountInfoDouble(ACCOUNT_BALANCE), AccountInfoDouble(ACCOUNT_EQUITY)
    );
 }
 
 bool SendHistory()
 {
    string symbol = BridgeSymbol;
-   if(!SymbolSelect(symbol, true))
-   {
-      Print("GoldBridgeEA cannot select symbol: ", symbol);
-      return false;
-   }
-
+   if(!SymbolSelect(symbol, true)) return false;
    int wanted = MathMax(300, HistoricalBars);
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
@@ -107,40 +112,28 @@ bool SendHistory()
       Print("GoldBridgeEA history not ready. Copied M1 bars: ", copied);
       return false;
    }
-
    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
    int chunk = MathMax(10, MathMin(BatchSize, 200));
    string url = BatchUrl();
-
    for(int oldest = copied - 1; oldest >= 0; )
    {
       string body = "[";
       int added = 0;
-
       while(oldest >= 0 && added < chunk)
       {
          MqlRates bar = rates[oldest];
          double spread = (double)bar.spread * point;
-         if(spread <= 0.0)
-            spread = (double)SymbolInfoInteger(symbol, SYMBOL_SPREAD) * point;
-
+         if(spread <= 0.0) spread = (double)SymbolInfoInteger(symbol, SYMBOL_SPREAD) * point;
          double bid = bar.close - spread / 2.0;
          double ask = bar.close + spread / 2.0;
          if(added > 0) body += ",";
          body += PacketJson(symbol, bar, bid, ask, spread);
-
          oldest--;
          added++;
       }
-
       body += "]";
-      if(!PostJson(url, body))
-      {
-         Print("GoldBridgeEA failed sending historical batch.");
-         return false;
-      }
+      if(!PostJson(url, body)) return false;
    }
-
    Print("GoldBridgeEA historical M1 upload complete. Bars=", copied);
    return true;
 }
@@ -149,23 +142,82 @@ bool SendLivePacket()
 {
    string symbol = BridgeSymbol;
    if(!SymbolSelect(symbol, true)) return false;
-
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
    if(CopyRates(symbol, PERIOD_M1, 0, 1, rates) != 1) return false;
-
    MqlTick tick;
    if(!SymbolInfoTick(symbol, tick)) return false;
+   return PostJson(BridgeUrl, PacketJson(symbol, rates[0], tick.bid, tick.ask, tick.ask - tick.bid));
+}
 
-   double spread = tick.ask - tick.bid;
-   string body = PacketJson(symbol, rates[0], tick.bid, tick.ask, spread);
-   return PostJson(BridgeUrl, body);
+double NormalizeVolume(string symbol, double requested)
+{
+   double minv = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   double maxv = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+   double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0.0) step = minv;
+   double v = MathMax(minv, MathMin(maxv, requested));
+   v = MathFloor(v / step + 0.5) * step;
+   return NormalizeDouble(v, 2);
+}
+
+void ReportCommand(string command_id, bool ok, string detail)
+{
+   StringReplace(detail, " ", "_");
+   StringReplace(detail, "|", "_");
+   string account = StringFormat("%I64d", AccountInfoInteger(ACCOUNT_LOGIN));
+   string url = BaseUrl() + "/command_result/" + account + "/" + command_id + "?ok=" + (ok ? "1" : "0") + "&detail=" + detail;
+   string ignored;
+   GetText(url, ignored);
+}
+
+void PollManualOrder()
+{
+   if(!EnableManualOrders) return;
+   string account = StringFormat("%I64d", AccountInfoInteger(ACCOUNT_LOGIN));
+   string text;
+   if(!GetText(BaseUrl() + "/command_text/" + account, text)) return;
+   StringTrimLeft(text);
+   StringTrimRight(text);
+   if(text == "" || text == "NONE") return;
+
+   string parts[];
+   int count = StringSplit(text, '|', parts);
+   if(count != 6)
+   {
+      Print("GoldBridgeEA invalid command: ", text);
+      return;
+   }
+
+   string command_id = parts[0];
+   string side = parts[1];
+   string symbol = parts[2];
+   double volume = NormalizeVolume(symbol, StringToDouble(parts[3]));
+   double sl = StringToDouble(parts[4]);
+   double tp = StringToDouble(parts[5]);
+
+   if(!SymbolSelect(symbol, true))
+   {
+      ReportCommand(command_id, false, "symbol_not_available");
+      return;
+   }
+
+   trade.SetExpertMagicNumber(ManualOrderMagic);
+   trade.SetTypeFillingBySymbol(symbol);
+   bool ok = false;
+   if(side == "BUY") ok = trade.Buy(volume, symbol, 0.0, sl, tp, "AI-Lab manual BUY");
+   else if(side == "SELL") ok = trade.Sell(volume, symbol, 0.0, sl, tp, "AI-Lab manual SELL");
+
+   string detail = "retcode_" + IntegerToString((int)trade.ResultRetcode());
+   Print("GoldBridgeEA manual order ", side, " id=", command_id, " ok=", ok, " ", detail);
+   ReportCommand(command_id, ok, detail);
 }
 
 int OnInit()
 {
    EventSetTimer(1);
-   Print("GoldBridgeEA started. Mode=", AccountModeText(), " account=", AccountInfoInteger(ACCOUNT_LOGIN), " symbol=", BridgeSymbol);
+   Print("GoldBridgeEA started. Mode=", AccountModeText(), " account=", AccountInfoInteger(ACCOUNT_LOGIN),
+         " symbol=", BridgeSymbol, " manualOrders=", EnableManualOrders);
    return INIT_SUCCEEDED;
 }
 
@@ -181,7 +233,7 @@ void OnTimer()
       history_sent = SendHistory();
       if(!history_sent) return;
    }
-
+   PollManualOrder();
    long now = TimeLocal();
    if(now - last_send < SendEverySeconds) return;
    last_send = now;
