@@ -233,40 +233,77 @@ with left:
     live_panel()
 
 with right:
-    st.subheader("Manual Trade")
-    st.caption("AI pre-fills SL/TP. You may edit them. Order is sent only after your click.")
-    symbol = str(selected_meta.get("symbol", "GOLD"))
-    volume = st.number_input("Lots", min_value=.01, value=.01, step=.01, format="%.2f")
-    default_sl = float(latest.stop) if latest.stop != latest.entry else 0.0
-    default_tp = float(latest.target) if latest.target != latest.entry else 0.0
-    manual_sl = st.number_input("Stop Loss • AI default, editable", min_value=0., value=max(0., default_sl), step=.10, format="%.2f")
-    manual_tp = st.number_input("Take Profit • AI default, editable", min_value=0., value=max(0., default_tp), step=.10, format="%.2f")
-    confirmed = st.checkbox(f"Confirm {selected_meta.get('account_mode')} account")
-    b1, b2 = st.columns(2)
-    if b1.button("🟢 BUY", use_container_width=True, type="primary"):
-        if not confirmed:
-            st.error("Confirm account first")
-        else:
-            try:
-                r = queue_order(bridge_url, selected_account, "BUY", symbol, volume, manual_sl, manual_tp)
-                st.success(f"BUY queued • {r.get('command_id')}")
-            except Exception as exc:
-                st.error(str(exc))
-    if b2.button("🔴 SELL", use_container_width=True):
-        if not confirmed:
-            st.error("Confirm account first")
-        else:
-            try:
-                r = queue_order(bridge_url, selected_account, "SELL", symbol, volume, manual_sl, manual_tp)
-                st.success(f"SELL queued • {r.get('command_id')}")
-            except Exception as exc:
-                st.error(str(exc))
-
-    st.divider()
-    st.subheader("MT5 Execution")
-
     @st.fragment(run_every="2s")
-    def execution_panel():
+    def manual_trade_panel():
+        st.subheader("Manual Trade")
+        st.caption("AI can keep SL/TP synchronized. Turn Auto-fill OFF before editing them manually.")
+        try:
+            live_raw = load_bridge(bridge_url, selected_account)
+            lm1 = features(live_raw, scfg).dropna().reset_index(drop=True)
+            lm5 = features(resample_m5(live_raw), scfg).dropna().reset_index(drop=True)
+            sig = SignalEngine(scfg, news).decide_at(lm1, lm5, len(lm1)-1)
+        except Exception as exc:
+            st.warning(f"SL/TP signal refresh unavailable: {exc}")
+            sig = latest
+
+        auto_key = f"auto_fill_{selected_account}"
+        sl_key = f"manual_sl_{selected_account}"
+        tp_key = f"manual_tp_{selected_account}"
+        sync_key = f"sl_tp_sync_key_{selected_account}"
+
+        if auto_key not in st.session_state:
+            st.session_state[auto_key] = True
+        auto_fill = st.toggle("⚡ Auto-fill AI SL / TP", key=auto_key)
+
+        valid_levels = float(sig.stop) > 0 and float(sig.target) > 0 and float(sig.stop) != float(sig.entry) and float(sig.target) != float(sig.entry)
+        signal_sync = f"{pd.Timestamp(sig.timestamp).floor('min').isoformat()}|{sig.side}|{float(sig.stop):.2f}|{float(sig.target):.2f}"
+
+        if sl_key not in st.session_state:
+            st.session_state[sl_key] = float(sig.stop) if valid_levels else 0.0
+        if tp_key not in st.session_state:
+            st.session_state[tp_key] = float(sig.target) if valid_levels else 0.0
+
+        if auto_fill and valid_levels and st.session_state.get(sync_key) != signal_sync:
+            st.session_state[sl_key] = round(float(sig.stop), 2)
+            st.session_state[tp_key] = round(float(sig.target), 2)
+            st.session_state[sync_key] = signal_sync
+
+        symbol = str(selected_meta.get("symbol", "GOLD"))
+        volume = st.number_input("Lots", min_value=.01, value=.01, step=.01, format="%.2f", key=f"lots_{selected_account}")
+        manual_sl = st.number_input("Stop Loss • AI default, editable", min_value=0., step=.10, format="%.2f", key=sl_key, disabled=False)
+        manual_tp = st.number_input("Take Profit • AI default, editable", min_value=0., step=.10, format="%.2f", key=tp_key, disabled=False)
+
+        if auto_fill:
+            if valid_levels:
+                st.caption(f"Synced from {sig.side}: SL {float(sig.stop):.2f} • TP {float(sig.target):.2f}")
+            else:
+                st.caption("No valid AI SL/TP yet. Waiting for directional setup.")
+        else:
+            st.caption("Manual SL/TP mode. Values will not be overwritten by the live signal.")
+
+        confirmed = st.checkbox(f"Confirm {selected_meta.get('account_mode')} account", key=f"confirm_{selected_account}")
+        b1, b2 = st.columns(2)
+        if b1.button("🟢 BUY", use_container_width=True, type="primary", key=f"buy_{selected_account}"):
+            if not confirmed:
+                st.error("Confirm account first")
+            else:
+                try:
+                    r = queue_order(bridge_url, selected_account, "BUY", symbol, volume, manual_sl, manual_tp)
+                    st.success(f"BUY queued • {r.get('command_id')}")
+                except Exception as exc:
+                    st.error(str(exc))
+        if b2.button("🔴 SELL", use_container_width=True, key=f"sell_{selected_account}"):
+            if not confirmed:
+                st.error("Confirm account first")
+            else:
+                try:
+                    r = queue_order(bridge_url, selected_account, "SELL", symbol, volume, manual_sl, manual_tp)
+                    st.success(f"SELL queued • {r.get('command_id')}")
+                except Exception as exc:
+                    st.error(str(exc))
+
+        st.divider()
+        st.subheader("MT5 Execution")
         try:
             h = get_json(bridge_url.rstrip("/") + f"/orders/{selected_account}")
             results = h.get("results", [])
@@ -274,7 +311,8 @@ with right:
             meta = next((a for a in live_accounts if a.get("account_id") == selected_account), {})
         except Exception as exc:
             st.caption(f"Execution status unavailable: {exc}")
-            return
+            results = []
+            meta = {}
 
         pos_ticket = meta.get("current_position_ticket") or "CLOSED / NONE"
         pos_side = meta.get("current_position_side") or "NONE"
@@ -285,31 +323,31 @@ with right:
         else:
             st.caption("Current position: CLOSED / NONE")
 
-        if not results:
-            st.caption("No structured execution result yet. Compile the latest EA to enable detailed telemetry.")
-            return
+        if results:
+            x = results[-1]
+            status = "✅ EXECUTED" if x.get("ok") else "❌ FAILED"
+            st.markdown(f"**{status}** • `{x.get('command_id','')}`")
+            q1, q2 = st.columns(2)
+            q1.metric("Order ticket", x.get("order_ticket") or "—")
+            q2.metric("Deal ticket", x.get("deal_ticket") or "—")
+            q1.metric("Executed price", f"{float(x.get('executed_price') or 0):.2f}")
+            q2.metric("Volume", f"{float(x.get('volume') or 0):.2f}")
+            q1.metric("Retcode", x.get("retcode") or "—")
+            q2.metric("Position ticket", x.get("current_position_ticket") or pos_ticket)
+            desc = x.get("retcode_description") or x.get("detail") or ""
+            if desc:
+                st.caption(f"Retcode description: {desc}")
+        else:
+            st.caption("No structured execution result yet.")
 
-        x = results[-1]
-        status = "✅ EXECUTED" if x.get("ok") else "❌ FAILED"
-        st.markdown(f"**{status}** • `{x.get('command_id','')}`")
-        q1, q2 = st.columns(2)
-        q1.metric("Order ticket", x.get("order_ticket") or "—")
-        q2.metric("Deal ticket", x.get("deal_ticket") or "—")
-        q1.metric("Executed price", f"{float(x.get('executed_price') or 0):.2f}")
-        q2.metric("Volume", f"{float(x.get('volume') or 0):.2f}")
-        q1.metric("Retcode", x.get("retcode") or "—")
-        q2.metric("Position ticket", x.get("current_position_ticket") or pos_ticket)
-        desc = x.get("retcode_description") or x.get("detail") or ""
-        if desc:
-            st.caption(f"Retcode description: {desc}")
-    execution_panel()
+        st.divider()
+        st.caption("Signal guide")
+        st.markdown("**BUY / SELL** = M1 + M5 confirmed  \n**WATCH BUY / SELL** = directional setup forming  \n**WAIT** = score below useful edge threshold")
+        st.metric("Backtest PF", "∞" if metrics["profit_factor"] == float("inf") else f"{metrics['profit_factor']:.2f}")
+        st.metric("Win rate", f"{metrics['win_rate_pct']:.1f}%")
+        st.metric("Max DD", f"{metrics['max_drawdown_pct']:.2f}%")
 
-    st.divider()
-    st.caption("Signal guide")
-    st.markdown("**BUY / SELL** = M1 + M5 confirmed  \n**WATCH BUY / SELL** = directional setup forming  \n**WAIT** = score below useful edge threshold")
-    st.metric("Backtest PF", "∞" if metrics["profit_factor"] == float("inf") else f"{metrics['profit_factor']:.2f}")
-    st.metric("Win rate", f"{metrics['win_rate_pct']:.1f}%")
-    st.metric("Max DD", f"{metrics['max_drawdown_pct']:.2f}%")
+    manual_trade_panel()
 
 st.divider()
 t1, t2, t3, t4, t5 = st.tabs(["🕒 Session performance", "🟢🔴 24h zones", "🖱 Orders", "📒 Backtest", "🤖 AI context"])
@@ -359,4 +397,4 @@ with t5:
         text = ai_commentary(m1, latest)
         st.write(text if text else "OPENAI_API_KEY is not configured. Quant signal engine still runs.")
 
-st.caption("Signals are quantitative/model outputs, not guarantees. Manual execution only. AI SL/TP are ATR-based defaults and remain editable before order submission.")
+st.caption("Signals are quantitative/model outputs, not guarantees. Manual execution only. With Auto-fill ON, AI SL/TP synchronize to the latest live setup; switch it OFF before manual editing.")
