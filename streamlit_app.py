@@ -65,17 +65,23 @@ def gold_chart(frame,zones):
 
 
 bridge_url=secret("MT5_BRIDGE_URL","http://127.0.0.1:8765")
-source="FxPro MT5 Bridge"; selected_account=None; selected_meta=None
+source="FxPro MT5 Bridge"; selected_account=None; selected_meta=None; accounts=[]; labels={}
 try:
-    accounts=bridge_accounts(bridge_url); labels={f"{a['account_mode']} • {a['account_id']} • {a.get('symbol','GOLD')}":a["account_id"] for a in accounts}
-    if labels:
-        default_label=list(labels)[0]; selected_label=default_label; selected_account=labels[selected_label]; selected_meta=next(a for a in accounts if a["account_id"]==selected_account)
-except Exception as exc: st.error(f"MT5 bridge not reachable: {exc}")
+    accounts=bridge_accounts(bridge_url)
+    labels={f"{a['account_mode']} • {a['account_id']} • {a.get('symbol','GOLD')}":a["account_id"] for a in accounts}
+except Exception as exc:
+    st.error(f"MT5 bridge not reachable: {exc}")
 
 max_spread=.60; vol_ratio=1.80; sl_atr=.90; tp_atr=1.35; be_r=.75; trail_start_r=1.; trail_atr=.60; starting_equity=10000.; risk_pct=.25; max_daily_loss_pct=1.; max_trades=8
 with st.sidebar:
     st.header("Connection")
-    if selected_meta: st.success(f"{selected_meta.get('account_mode')} • {selected_account}\n\n{selected_meta.get('symbol','GOLD')} • {selected_meta.get('bars',0)} bars")
+    if labels:
+        selected_label=st.selectbox("MT5 account",list(labels.keys()),key="mt5_account_selector")
+        selected_account=labels[selected_label]
+        selected_meta=next(a for a in accounts if a["account_id"]==selected_account)
+        st.success(f"{selected_meta.get('account_mode')} • {selected_account}\n\n{selected_meta.get('symbol','GOLD')} • {selected_meta.get('bars',0)} bars")
+    else:
+        st.warning("No MT5 account is currently sending data to the bridge.")
     st.caption(bridge_url)
     with st.expander("Strategy settings",expanded=False):
         max_spread=st.number_input("Max spread ($)",.01,10.,.60,.05); vol_ratio=st.number_input("Volatility spike limit",1.,5.,1.80,.05); sl_atr=st.number_input("Stop ATR",.2,5.,.90,.05); tp_atr=st.number_input("Target ATR",.2,8.,1.35,.05)
@@ -83,9 +89,9 @@ with st.sidebar:
     with st.expander("Risk / backtest",expanded=False):
         starting_equity=st.number_input("Starting equity",100.,value=10000.,step=500.); risk_pct=st.number_input("Risk / trade %",.01,5.,.25,.05); max_daily_loss_pct=st.number_input("Daily loss kill-switch %",.1,20.,1.,.1); max_trades=st.number_input("Max trades/day",1,100,8,1)
 
+if not selected_account: st.stop()
 scfg=StrategyConfig(max_spread=max_spread,vol_spike_ratio=vol_ratio,sl_atr=sl_atr,tp_atr=tp_atr,breakeven_r=be_r,trailing_start_r=trail_start_r,trailing_atr=trail_atr)
 rcfg=RiskConfig(starting_equity=starting_equity,risk_per_trade=risk_pct/100,max_daily_loss=max_daily_loss_pct/100,max_trades_per_day=int(max_trades)); news=NewsBlackout.from_csv("sample_news.csv",20,20)
-if not selected_account: st.stop()
 try:
     raw=load_bridge(bridge_url,selected_account); trades,equity,metrics=Backtester(scfg,rcfg,news).run(raw); m1=features(raw,scfg).dropna().reset_index(drop=True); m5=features(resample_m5(raw),scfg).dropna().reset_index(drop=True); latest=SignalEngine(scfg,news).decide_at(m1,m5,len(m1)-1)
 except Exception as exc: st.error(str(exc)); st.stop()
