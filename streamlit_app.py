@@ -23,7 +23,7 @@ from trading_core import (
 load_dotenv()
 st.set_page_config(page_title="Gold Scalping AI Lab", page_icon="🥇", layout="wide")
 st.title("🥇 Gold Scalping AI Lab")
-st.caption("FxPro MT5 + XAUUSD M1/M5 research dashboard. Supports REAL and DEMO account data through the MT5 bridge.")
+st.caption("FxPro MT5 + GOLD M1/M5 research dashboard. Supports REAL and DEMO account data through the MT5 bridge.")
 
 
 def secret(name: str, default: str = "") -> str:
@@ -42,6 +42,7 @@ def load_bridge(base_url: str, account_id: str, limit: int = 1500) -> pd.DataFra
         raise ValueError("MT5 bridge has no bars for this account yet")
     df = pd.DataFrame(rows)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df = df.sort_values("timestamp").drop_duplicates(subset=["timestamp"], keep="last").reset_index(drop=True)
     return df[["timestamp", "open", "high", "low", "close", "spread"]].copy()
 
 
@@ -74,12 +75,15 @@ with st.sidebar:
         try:
             accounts = bridge_accounts(bridge_url)
             labels = {
-                f"{a['account_mode']} • {a['account_id']} • {a.get('symbol','XAUUSD')}": a["account_id"]
+                f"{a['account_mode']} • {a['account_id']} • {a.get('symbol','GOLD')}": a["account_id"]
                 for a in accounts
             }
             if labels:
                 label = st.selectbox("MT5 account", list(labels.keys()))
                 selected_account = labels[label]
+                selected_meta = next((a for a in accounts if a["account_id"] == selected_account), None)
+                if selected_meta:
+                    st.caption(f"Bridge bars: {selected_meta.get('bars', 0)}")
             else:
                 st.warning("Bridge connected, but no MT5 accounts are sending data yet.")
         except Exception as exc:
@@ -139,38 +143,49 @@ c3.metric("Profit factor", "∞" if pf == float("inf") else f"{pf:.2f}")
 c4.metric("Max drawdown", f"{metrics['max_drawdown_pct']:.2f}%")
 c5.metric("Net P/L", f"${metrics['net_pnl']:.2f}")
 
-sig_col, state_col = st.columns([2,1])
+sig_col, risk_col = st.columns([2,1])
 with sig_col:
-    st.subheader("Latest signal")
-    st.write({"side": latest.side, "score": round(latest.score,2), "M1": latest.m1_side, "M5": latest.m5_side,
-              "entry": round(latest.entry,2), "stop": round(latest.stop,2), "target": round(latest.target,2),
-              "reason": latest.reason, "filter": latest.filter_reason})
-with state_col:
-    st.subheader("Data state")
-    st.success(source)
-    if source == "FxPro MT5 Bridge" and selected_account:
-        acct = next((a for a in accounts if str(a["account_id"]) == str(selected_account)), None)
-        if acct:
-            st.write({"mode": acct.get("account_mode"), "account": acct.get("account_id"), "last_seen": acct.get("last_seen")})
+    st.subheader("Latest paper signal")
+    st.write({
+        "side": latest.side,
+        "score": round(latest.score,2),
+        "M1": latest.m1_side,
+        "M5": latest.m5_side,
+        "entry": round(latest.entry,2),
+        "stop": round(latest.stop,2),
+        "target": round(latest.target,2),
+        "reason": latest.reason,
+        "filter": latest.filter_reason,
+    })
+with risk_col:
+    st.subheader("Safety state")
+    st.success("PAPER / DEMO research mode")
+    st.info(f"Daily kill-switch: {max_daily_loss_pct:.2f}%\n\nMax trades/day: {int(max_trades)}")
 
-chart_tab, trades_tab, equity_tab, mt5_tab, ai_tab = st.tabs(["📈 Trend", "📒 Journal", "💰 Equity", "🔌 FxPro MT5", "🤖 AI"])
+chart_tab, trades_tab, equity_tab, ai_tab, format_tab = st.tabs(["📈 Trend chart", "📒 Trade journal", "💰 Equity", "🤖 AI context", "🧾 CSV format"])
 with chart_tab:
-    st.line_chart(m1.tail(400).set_index("timestamp")[["close","ema9","ema21","ema50"]])
+    view = m1.tail(400).set_index("timestamp")[["close", "ema9", "ema21", "ema50"]]
+    st.line_chart(view)
+    st.caption("M1 close + EMA 9/21/50. M5 confirmation is calculated from completed 5-minute bars.")
 with trades_tab:
-    st.dataframe(trades, use_container_width=True, hide_index=True) if not trades.empty else st.info("No trades in this window/configuration.")
+    if trades.empty:
+        st.warning("No trades in this sample/configuration.")
+    else:
+        st.dataframe(trades, use_container_width=True, hide_index=True)
+        st.download_button("Download journal CSV", trades.to_csv(index=False), "trade_journal.csv", "text/csv")
 with equity_tab:
-    if not equity.empty: st.line_chart(equity.set_index("timestamp")[["equity"]])
-with mt5_tab:
-    st.subheader("FxPro MT5 Bridge")
-    st.markdown("This build supports both **REAL** and **DEMO** MT5 accounts. The EA only sends market/account telemetry; it does not place orders.")
-    st.code("python3 bridge_server.py", language="bash")
-    st.markdown("In MT5: open MetaEditor, compile `mt5/GoldBridgeEA.mq5`, attach it to an XAUUSD chart, and allow the bridge URL under Expert Advisors → WebRequest allowed URLs.")
-    st.code("http://127.0.0.1:8765", language="text")
-    st.info("For Streamlit Cloud, set MT5_BRIDGE_URL to a publicly reachable HTTPS bridge endpoint. localhost works only when Streamlit runs on the same Mac.")
+    if not equity.empty:
+        st.line_chart(equity.set_index("timestamp")[["equity"]])
 with ai_tab:
     if st.button("Generate AI risk commentary"):
         text = ai_commentary(m1, latest)
-        st.write(text or "OPENAI_API_KEY is not configured.")
+        if text:
+            st.write(text)
+        else:
+            st.warning("OPENAI_API_KEY is not configured. The quantitative engine still works without it.")
+with format_tab:
+    st.code("timestamp,open,high,low,close,spread\n2026-08-27T08:00:00Z,4500.1,4501.2,4499.7,4500.8,0.25", language="text")
+    st.code("timestamp,title,currency,impact\n2026-08-27T12:30:00Z,US GDP,USD,high", language="text")
 
 st.divider()
-st.caption("Research / analysis build. REAL and DEMO data are kept separate by MT5 account ID and account mode.")
+st.caption("Backtests are estimates, not guarantees. This build uses MT5 data in analysis mode and does not place autonomous live-money orders.")
