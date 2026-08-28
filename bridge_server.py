@@ -2,15 +2,15 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Any
+from typing import Any, Deque, Dict, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="Gold Scalping MT5 Bridge", version="0.1")
 _lock = Lock()
-_bars: dict[str, deque[dict[str, Any]]] = defaultdict(lambda: deque(maxlen=5000))
-_accounts: dict[str, dict[str, Any]] = {}
+_bars: Dict[str, Deque[Dict[str, Any]]] = defaultdict(lambda: deque(maxlen=5000))
+_accounts: Dict[str, Dict[str, Any]] = {}
 
 
 class MT5Packet(BaseModel):
@@ -26,8 +26,8 @@ class MT5Packet(BaseModel):
     bid: float
     ask: float
     spread: float
-    balance: float | None = None
-    equity: float | None = None
+    balance: Optional[float] = None
+    equity: Optional[float] = None
 
 
 @app.get("/health")
