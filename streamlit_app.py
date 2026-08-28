@@ -3,6 +3,7 @@ import io
 import os
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
@@ -58,6 +59,56 @@ def read_uploaded_csv(uploaded, fallback: str) -> pd.DataFrame:
     tmp = Path(".uploaded_market.csv")
     tmp.write_bytes(uploaded.getvalue())
     return CsvFeed(str(tmp)).load()
+
+
+def gold_chart(frame: pd.DataFrame):
+    view = frame.tail(240).copy()
+    view["direction"] = view["close"] >= view["open"]
+
+    price_min = float(view[["low", "ema9", "ema21", "ema50"]].min().min())
+    price_max = float(view[["high", "ema9", "ema21", "ema50"]].max().max())
+    span = max(price_max - price_min, 0.5)
+    pad = span * 0.08
+    domain = [price_min - pad, price_max + pad]
+
+    x = alt.X("timestamp:T", title="Time", axis=alt.Axis(format="%H:%M"))
+    y_scale = alt.Scale(domain=domain, zero=False)
+
+    wick = alt.Chart(view).mark_rule().encode(
+        x=x,
+        y=alt.Y("low:Q", scale=y_scale, title="GOLD price"),
+        y2="high:Q",
+        tooltip=[
+            alt.Tooltip("timestamp:T", title="Time"),
+            alt.Tooltip("open:Q", format=".2f"),
+            alt.Tooltip("high:Q", format=".2f"),
+            alt.Tooltip("low:Q", format=".2f"),
+            alt.Tooltip("close:Q", format=".2f"),
+        ],
+    )
+
+    body = alt.Chart(view).mark_bar(size=3).encode(
+        x=x,
+        y=alt.Y("open:Q", scale=y_scale, title="GOLD price"),
+        y2="close:Q",
+        color=alt.condition("datum.direction", alt.value("#21c55d"), alt.value("#ef4444")),
+    )
+
+    ema_long = view[["timestamp", "ema9", "ema21", "ema50"]].melt(
+        id_vars="timestamp", var_name="series", value_name="price"
+    )
+    emas = alt.Chart(ema_long).mark_line(strokeWidth=1.6).encode(
+        x=x,
+        y=alt.Y("price:Q", scale=y_scale, title="GOLD price"),
+        color=alt.Color("series:N", title="EMA"),
+        tooltip=[
+            alt.Tooltip("timestamp:T", title="Time"),
+            alt.Tooltip("series:N", title="Line"),
+            alt.Tooltip("price:Q", format=".2f"),
+        ],
+    )
+
+    return (wick + body + emas).properties(height=460).interactive(bind_y=False)
 
 
 with st.sidebar:
@@ -164,9 +215,13 @@ with risk_col:
 
 chart_tab, trades_tab, equity_tab, ai_tab, format_tab = st.tabs(["📈 Trend chart", "📒 Trade journal", "💰 Equity", "🤖 AI context", "🧾 CSV format"])
 with chart_tab:
-    view = m1.tail(400).set_index("timestamp")[["close", "ema9", "ema21", "ema50"]]
-    st.line_chart(view)
-    st.caption("M1 close + EMA 9/21/50. M5 confirmation is calculated from completed 5-minute bars.")
+    st.altair_chart(gold_chart(m1), use_container_width=True)
+    last = m1.iloc[-1]
+    st.caption(
+        f"GOLD M1 candlesticks + EMA 9/21/50 • Last {last['close']:.2f} • "
+        f"EMA9 {last['ema9']:.2f} • EMA21 {last['ema21']:.2f} • EMA50 {last['ema50']:.2f}. "
+        "M5 confirmation uses completed 5-minute bars."
+    )
 with trades_tab:
     if trades.empty:
         st.warning("No trades in this sample/configuration.")
