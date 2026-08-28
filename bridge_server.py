@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="Gold Scalping MT5 Bridge", version="0.5")
+app = FastAPI(title="Gold Scalping MT5 Bridge", version="0.6")
 _lock = Lock()
 _bars: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(dict)
 _accounts: Dict[str, Dict[str, Any]] = {}
@@ -38,6 +38,12 @@ class MT5Packet(BaseModel):
     spread: float
     balance: Optional[float] = None
     equity: Optional[float] = None
+    current_position_ticket: Optional[str] = None
+    current_position_side: Optional[str] = None
+    current_position_volume: Optional[float] = None
+    current_position_price: Optional[float] = None
+    current_position_sl: Optional[float] = None
+    current_position_tp: Optional[float] = None
 
 
 class SignalZone(BaseModel):
@@ -106,6 +112,12 @@ def _store(packet: MT5Packet) -> None:
         "equity": packet.equity,
         "bars": len(account),
         "last_seen": row["received_at"],
+        "current_position_ticket": packet.current_position_ticket,
+        "current_position_side": packet.current_position_side,
+        "current_position_volume": packet.current_position_volume,
+        "current_position_price": packet.current_position_price,
+        "current_position_sl": packet.current_position_sl,
+        "current_position_tp": packet.current_position_tp,
     }
 
 
@@ -240,12 +252,39 @@ def command_text(account_id: str):
 
 
 @app.get("/command_result/{account_id}/{command_id}")
-def command_result(account_id: str, command_id: str, ok: int, detail: str = ""):
-    result = {"command_id": command_id, "account_id": account_id, "ok": bool(ok), "detail": detail[:300], "timestamp": _now().isoformat()}
+def command_result(
+    account_id: str,
+    command_id: str,
+    ok: int,
+    detail: str = "",
+    order_ticket: str = "",
+    deal_ticket: str = "",
+    executed_price: float = 0.0,
+    volume: float = 0.0,
+    retcode: int = 0,
+    retcode_description: str = "",
+    position_ticket: str = "",
+):
+    result = {
+        "command_id": command_id,
+        "account_id": account_id,
+        "ok": bool(ok),
+        "status": "EXECUTED" if ok else "FAILED",
+        "order_ticket": order_ticket or None,
+        "deal_ticket": deal_ticket or None,
+        "executed_price": executed_price,
+        "volume": volume,
+        "retcode": retcode,
+        "retcode_description": retcode_description.replace("_", " ")[:200],
+        "current_position_ticket": position_ticket or None,
+        "detail": detail.replace("_", " ")[:300],
+        "timestamp": _now().isoformat(),
+    }
     with _lock:
         for cmd in _commands.get(account_id, []):
             if cmd.get("id") == command_id:
-                cmd["status"] = "EXECUTED" if ok else "FAILED"
+                cmd["status"] = result["status"]
+                cmd["result"] = result
                 break
         _command_results[account_id].append(result)
         _command_results[account_id] = _command_results[account_id][-100:]
